@@ -76,7 +76,7 @@ const randomPractice = ref(cachedSettings.randomPractice ?? false)
 const trackErrors = ref(cachedSettings.trackErrors ?? true)
 const hideWord = ref(cachedSettings.hideWord ?? false)
 const pronunciation = createPronunciationService({
-  isDictionaryEnabled: () => dictionaryPronunciationEnabled.value,
+  isOnlineEnabled: () => dictionaryPronunciationEnabled.value,
 })
 const practiceIndex = ref(0)
 const wrongPracticeMode = ref(false)
@@ -1033,14 +1033,14 @@ selectCategory(initialCategory)
 
       <label
         class="dictionary-audio-toggle"
-        :title="dictionaryPronunciationEnabled ? '使用项目音频；不存在或播放失败时使用在线接口，最后使用设备语音' : '已关闭接口发音，直接使用设备语音'"
+        :title="dictionaryPronunciationEnabled ? '在线接口 → 项目音频 → 设备发音' : '项目音频 → 设备发音（不调用在线接口）'"
       >
         <span>接口发音</span>
         <input
           v-model="dictionaryPronunciationEnabled"
           type="checkbox"
           role="switch"
-          :aria-label="dictionaryPronunciationEnabled ? '关闭接口发音并改用设备语音' : '开启项目音频和在线接口发音'"
+          :aria-label="dictionaryPronunciationEnabled ? '关闭在线接口，保留项目音频和设备发音' : '开启在线接口优先发音'"
         />
         <span class="dictionary-audio-track" aria-hidden="true">
           <span></span>

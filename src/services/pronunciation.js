@@ -1,13 +1,18 @@
 const PUBLIC_AUDIO_STREAM_BASE_URL = 'https://dict.youdao.com/dictvoice'
 const PROJECT_AUDIO_ROOT_URL = `${import.meta.env.BASE_URL}data/audio/`
 const AUDIO_LOOKUP_SHARD_COUNT = 64
+const ONLINE_AUDIO_START_TIMEOUT_MS = 600
+const ONLINE_AUDIO_FAILURE_THRESHOLD = 2
+const ONLINE_AUDIO_COOLDOWN_MS = 5 * 60 * 1000
 export const DEVICE_SPEECH_RATE = 0.72
 
-export function createPronunciationService({ isDictionaryEnabled }) {
+export function createPronunciationService({ isOnlineEnabled }) {
   const projectAudioLookupPromises = new Map()
   let activeDictionaryAudio
   let pronunciationRequestId = 0
   let speechVoices = []
+  let onlineFailureCount = 0
+  let onlineUnavailableUntil = 0
 
   function refreshVoices() {
     if ('speechSynthesis' in window) speechVoices = window.speechSynthesis.getVoices()
@@ -73,6 +78,30 @@ export function createPronunciationService({ isDictionaryEnabled }) {
     return String(lang ?? '').toLowerCase() === 'en-us' ? 2 : 1
   }
 
+  function canTryOnlineAudio() {
+    if (Date.now() < onlineUnavailableUntil) return false
+    if (onlineUnavailableUntil) {
+      onlineUnavailableUntil = 0
+      onlineFailureCount = 0
+    }
+    return true
+  }
+
+  function recordOnlineSuccess() {
+    onlineFailureCount = 0
+    onlineUnavailableUntil = 0
+  }
+
+  function recordOnlineFailure() {
+    onlineFailureCount += 1
+    if (onlineFailureCount < ONLINE_AUDIO_FAILURE_THRESHOLD) return
+
+    // Avoid making every pronunciation wait on an unhealthy third-party host.
+    // The project audio remains available while this short circuit is open.
+    onlineFailureCount = 0
+    onlineUnavailableUntil = Date.now() + ONLINE_AUDIO_COOLDOWN_MS
+  }
+
   function lookupShard(key) {
     let hash = 0x811c9dc5
     for (let index = 0; index < key.length; index += 1) {
@@ -95,7 +124,7 @@ export function createPronunciationService({ isDictionaryEnabled }) {
         if (!response.ok) throw new Error(`HTTP ${response.status}`)
         return response.json()
       }).catch((error) => {
-        console.warn(`项目 type-${audioType}/${shard} 音频索引加载失败，将使用在线接口。`, error)
+        console.warn(`项目 type-${audioType}/${shard} 音频索引加载失败，将使用设备发音。`, error)
         return {}
       })
       projectAudioLookupPromises.set(cacheKey, lookupPromise)
@@ -113,26 +142,47 @@ export function createPronunciationService({ isDictionaryEnabled }) {
     return file ? `${PROJECT_AUDIO_ROOT_URL}${file.replace(/^\/+/, '')}` : ''
   }
 
-  function playAudioUrl(audioUrl, requestId, onFailure) {
+  function playAudioUrl(audioUrl, requestId, {
+    onFailure,
+    onStarted,
+    startTimeoutMs = 0,
+  }) {
     if (!audioUrl || requestId !== pronunciationRequestId) return
 
     let completed = false
+    let startTimer
     const audio = new Audio(audioUrl)
     audio.preload = 'auto'
     activeDictionaryAudio = audio
 
+    const clearStartTimer = () => window.clearTimeout(startTimer)
+    const handleStarted = () => {
+      if (completed || requestId !== pronunciationRequestId) return
+      clearStartTimer()
+      onStarted?.()
+    }
     const handleFailure = () => {
       if (completed) return
       completed = true
+      clearStartTimer()
+      audio.pause()
+      // Releasing src also aborts a request that stalled before playback.
+      audio.removeAttribute('src')
+      audio.load()
       if (activeDictionaryAudio === audio) activeDictionaryAudio = undefined
-      if (requestId === pronunciationRequestId) onFailure()
+      if (requestId === pronunciationRequestId) onFailure?.()
     }
 
     audio.addEventListener('ended', () => {
       completed = true
+      clearStartTimer()
       if (activeDictionaryAudio === audio) activeDictionaryAudio = undefined
     }, { once: true })
+    audio.addEventListener('playing', handleStarted, { once: true })
     audio.addEventListener('error', handleFailure, { once: true })
+    if (startTimeoutMs > 0) {
+      startTimer = window.setTimeout(handleFailure, startTimeoutMs)
+    }
     audio.play().catch(handleFailure)
   }
 
@@ -142,34 +192,62 @@ export function createPronunciationService({ isDictionaryEnabled }) {
     stop()
     window.speechSynthesis?.cancel()
 
-    if (!isDictionaryEnabled()) {
-      speakWithSystemVoice(text, lang, DEVICE_SPEECH_RATE)
-      return
-    }
-
-    // Keep the existing three-level fallback: bundled audio, public audio,
-    // and finally an operating-system voice when network playback fails.
     const requestId = pronunciationRequestId
-    let onlineFallbackStarted = false
+    let onlineAttemptStarted = false
+    let projectAttemptStarted = false
     let deviceFallbackStarted = false
     const fallbackToDevice = () => {
       if (deviceFallbackStarted || requestId !== pronunciationRequestId) return
       deviceFallbackStarted = true
       speakWithSystemVoice(text, lang, DEVICE_SPEECH_RATE)
     }
-    const fallbackToOnlineAudio = () => {
-      if (onlineFallbackStarted || requestId !== pronunciationRequestId) return
-      onlineFallbackStarted = true
+
+    const tryOnlineAudio = (onFailure) => {
+      if (onlineAttemptStarted || requestId !== pronunciationRequestId) return
+      onlineAttemptStarted = true
+      if (!canTryOnlineAudio()) {
+        onFailure()
+        return
+      }
+
       const onlineAudioUrl = getPublicAudioStreamUrl(text, lang)
-      if (onlineAudioUrl) playAudioUrl(onlineAudioUrl, requestId, fallbackToDevice)
-      else fallbackToDevice()
+      if (!onlineAudioUrl) {
+        onFailure()
+        return
+      }
+
+      playAudioUrl(onlineAudioUrl, requestId, {
+        startTimeoutMs: ONLINE_AUDIO_START_TIMEOUT_MS,
+        onStarted: recordOnlineSuccess,
+        onFailure: () => {
+          recordOnlineFailure()
+          onFailure()
+        },
+      })
     }
 
-    getProjectAudioUrl(text, lang).then((projectAudioUrl) => {
-      if (requestId !== pronunciationRequestId) return
-      if (projectAudioUrl) playAudioUrl(projectAudioUrl, requestId, fallbackToOnlineAudio)
-      else fallbackToOnlineAudio()
-    }).catch(fallbackToOnlineAudio)
+    const tryProjectAudio = (onFailure) => {
+      if (projectAttemptStarted || requestId !== pronunciationRequestId) return
+      projectAttemptStarted = true
+      getProjectAudioUrl(text, lang).then((projectAudioUrl) => {
+        if (requestId !== pronunciationRequestId) return
+        if (projectAudioUrl) {
+          playAudioUrl(projectAudioUrl, requestId, { onFailure })
+        } else {
+          onFailure()
+        }
+      }).catch(onFailure)
+    }
+
+    if (isOnlineEnabled()) {
+      // When the switch is on, prefer the faster public stream and keep the
+      // published project file plus the system voice as two independent fallbacks.
+      tryOnlineAudio(() => tryProjectAudio(fallbackToDevice))
+    } else {
+      // Turning the switch off disables only the third-party request. Project
+      // audio remains available and still falls back to the system voice.
+      tryProjectAudio(fallbackToDevice)
+    }
   }
 
   return { refreshVoices, speak, stop }

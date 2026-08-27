@@ -141,16 +141,17 @@ const words = await loadDataset('cet4-vocabulary')
 
 单词发音按以下顺序自动回退：
 
-1. 按发音类型加载项目音频：英式读取 `data/audio/type-1/lookup`，美式读取 `data/audio/type-2/lookup` 中当前单词对应的分片索引，查找并播放项目内的 MP3/WAV。
-2. 项目中没有对应文件或文件播放失败时，请求有道公共音频接口。
-3. 在线接口无法播放时，使用浏览器原生 Web Speech API。
+1. “接口发音”开启时优先请求有道公共音频接口，600 ms 内未开始播放或请求失败时回退项目音频。
+2. 按发音类型加载项目音频：英式读取 `data/audio/type-1/lookup`，美式读取 `data/audio/type-2/lookup` 中当前单词对应的分片索引，查找并播放项目内的 MP3/WAV。
+3. 项目音频也无法播放时，使用浏览器原生 Web Speech API。
 
 ```text
 https://dict.youdao.com/dictvoice?audio=<word>&type=<1|2>
 ```
 
-首页顶部提供“接口发音”开关，默认开启并保存到浏览器缓存。开启时按照“项目音频 → 在线接口 →
-设备语音”回退；关闭后完全跳过项目音频和在线接口，直接调用设备语音。
+首页顶部提供“接口发音”开关，默认开启并保存到浏览器缓存。开启时按照“在线接口 →
+项目音频 → 设备语音”回退；在线接口连续失败 2 次后熔断 5 分钟。关闭后只跳过在线接口，
+按照“项目音频 → 设备语音”回退。
 
 ```js
 const utterance = new SpeechSynthesisUtterance(text)
