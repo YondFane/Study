@@ -46,6 +46,10 @@ function publishProjectAudio() {
         await mkdir(destinationRoot, { recursive: true })
         await Promise.all([
           copyFile(resolve(sourceRoot, 'catalog.json'), resolve(destinationRoot, 'catalog.json')),
+          cp(resolve(sourceRoot, 'lookup'), resolve(destinationRoot, 'lookup'), {
+            recursive: true,
+            force: true,
+          }),
           cp(resolve(sourceRoot, 'files'), resolve(destinationRoot, 'files'), {
             recursive: true,
             force: false,

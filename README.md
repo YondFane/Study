@@ -39,7 +39,7 @@ StudyEnglish 是一个基于 Vue 3 和 Vite 构建的纯前端英语词汇学习
 
 单词播放采用三级回退策略：
 
-1. 英式通过 `data/audio/type-1/catalog.json`、美式通过 `data/audio/type-2/catalog.json` 查找项目内的 MP3/WAV 文件并直接播放。
+1. 英式通过 `data/audio/type-1/lookup`、美式通过 `data/audio/type-2/lookup` 的分片索引查找项目内的 MP3/WAV 文件并直接播放。
 2. 项目音频不存在或播放失败时，请求有道公共音频接口。
 3. 在线接口失败或浏览器阻止播放时，使用设备的 Web Speech API。
 
@@ -87,7 +87,7 @@ StudyEnglish 是一个基于 Vue 3 和 Vite 构建的纯前端英语词汇学习
 - 学习进度、浏览位置、错题和页面设置保存在当前浏览器的 `localStorage` 中。
 - 状态存储键为 `study-english:practice-state:v2`。
 - 已访问的构建资源由浏览器缓存和 Service Worker 复用。
-- 音频目录映射使用浏览器 HTTP 缓存，避免每次播放都重新下载目录。
+- 音频目录映射拆成 64 个小分片并使用浏览器 HTTP 缓存，首次发音只加载当前单词对应的分片。
 - 隐私模式、清除站点数据或更换设备会丢失本地学习记录。
 - GitHub Pages 是静态托管，浏览器产生的个人进度不会写回 GitHub 仓库。
 
@@ -116,14 +116,16 @@ const searchIndex = await loadSearchIndex()
 
 ### 音频映射与发布
 
-音频文件使用 SHA-256 哈希路径保存，单词与实际文件路径的对应关系记录在 `catalog.json`。网页首次需要播放项目音频时才加载该目录，并建立内存映射。
+音频文件使用 SHA-256 哈希路径保存，`catalog.json` 是完整目录的维护数据源。构建前会从中生成 64 个 `lookup/*.json` 小分片；网页首次播放时只加载当前单词对应的约 20 KB 分片，不再下载约 2 MB 的完整目录。
 
 生产构建结束后，`vite.config.js` 会把以下内容复制到 `dist`：
 
 ```text
 data/audio/type-1/catalog.json  -> dist/data/audio/type-1/catalog.json
+data/audio/type-1/lookup/       -> dist/data/audio/type-1/lookup/
 data/audio/type-1/files/        -> dist/data/audio/type-1/files/
 data/audio/type-2/catalog.json  -> dist/data/audio/type-2/catalog.json
+data/audio/type-2/lookup/       -> dist/data/audio/type-2/lookup/
 data/audio/type-2/files/        -> dist/data/audio/type-2/files/
 ```
 
@@ -213,6 +215,14 @@ pnpm preview
 pnpm run generate:search-index
 ```
 
+音频目录变化后重新生成浏览器分片索引：
+
+```bash
+pnpm run generate:audio-lookup
+```
+
+`pnpm dev` 会自动刷新音频分片，`pnpm build` 会自动执行搜索和音频两个索引生成任务；生成的分片不提交到 Git。
+
 建立去重例句任务目录（不调用模型）：
 
 ```bash
@@ -292,6 +302,6 @@ pnpm run normalize:audio
 
 - 不要删除 `vite.config.js` 中的 `/StudyEnglish/` 基础路径，否则 GitHub Pages 资源会出现 404。
 - 不要一次性静态导入全部词库，这会显著增加首屏体积。
-- `data/audio/type-1`、`data/audio/type-2` 的 `catalog.json` 和实际音频目录必须同时发布。
+- `data/audio/type-1`、`data/audio/type-2` 的 `catalog.json`、`lookup` 和实际音频目录必须同时发布。
 - 在线发音接口受网络和第三方服务状态影响，失败时会自动回退到设备语音。
 - 设备语音的效果取决于浏览器和操作系统安装的英语语音包。

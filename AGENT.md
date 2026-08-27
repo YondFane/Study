@@ -141,7 +141,7 @@ const words = await loadDataset('cet4-vocabulary')
 
 单词发音按以下顺序自动回退：
 
-1. 按发音类型加载项目音频：英式读取 `data/audio/type-1/catalog.json`，美式读取 `data/audio/type-2/catalog.json`，查找并播放项目内的 MP3/WAV。
+1. 按发音类型加载项目音频：英式读取 `data/audio/type-1/lookup`，美式读取 `data/audio/type-2/lookup` 中当前单词对应的分片索引，查找并播放项目内的 MP3/WAV。
 2. 项目中没有对应文件或文件播放失败时，请求有道公共音频接口。
 3. 在线接口无法播放时，使用浏览器原生 Web Speech API。
 
@@ -169,6 +169,7 @@ window.speechSynthesis.speak(utterance)
 注意：
 
 - `vite.config.js` 会在生产构建结束时把 `type-1` 和 `type-2` 音频目录及目录映射复制到 `dist/data/audio`，供 GitHub Pages 使用。
+- `catalog.json` 是完整音频目录的数据源；`pnpm build` 会运行 `generate:audio-lookup`，生成 64 个小分片，避免首次发音下载约 2 MB 的完整目录。
 - 在线发音依赖网络；接口无音频或无法访问时仍可使用设备语音。
 - 实际声音取决于浏览器和操作系统安装的语音包。
 
@@ -388,6 +389,9 @@ base: '/StudyEnglish/'
 
 - 16 个 JSON 数据集通过动态 `import()` 分包，并按 8 个分类加载。
 - 用户只有在点击某个标签时才加载对应数据。
+- 大型词库使用浅响应式数组，同一词库的页面元数据装饰结果会被缓存，切回词库时不重复创建数千个对象。
+- 本地搜索输入经过短防抖，并缓存词条字段的规范化文本，避免每次按键重复转换全部字段。
+- 音频目录按 64 个小索引分片加载，首次自动发音只请求当前单词所在分片。
 - 单词列表每批渲染 120 条，避免同时创建数千个 DOM 节点。
 - 部分大型 JSON 词库构建后会出现大于 500 KB 的 chunk 警告；当前属于已知警告，不影响构建成功。
 - 粒子动画限制设备像素比最高为 2，避免高分辨率屏幕产生过高绘制开销。

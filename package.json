@@ -4,6 +4,7 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
+    "predev": "pnpm run generate:audio-lookup",
     "dev": "vite",
     "download:audio": "node scripts/download-audio.mjs",
     "normalize:audio": "node scripts/normalize-audio-extensions.mjs",
@@ -13,7 +14,8 @@
     "start:example-generation": "node scripts/start-example-generation.mjs",
     "apply:examples": "node scripts/apply-examples.mjs --write",
     "generate:search-index": "node scripts/generate-search-index.mjs",
-    "prebuild": "pnpm run generate:search-index",
+    "generate:audio-lookup": "node scripts/generate-audio-lookup.mjs",
+    "prebuild": "pnpm run generate:search-index && pnpm run generate:audio-lookup",
     "build": "vite build",
     "preview": "vite preview"
   },

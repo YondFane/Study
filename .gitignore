@@ -5,3 +5,5 @@ data/examples/*.tmp
 data/examples/sources/
 data/examples/runner-*.log
 data/examples/runner-state.json
+/data/audio/type-*/lookup/
+/dist/data/audio/type-*/lookup/

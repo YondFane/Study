@@ -1,119 +1,38 @@
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import ParticleBackground from './components/ParticleBackground.vue'
 import {
-  categories as excelCategories,
-  datasets as excelDatasets,
-  loadDataset,
-  loadSearchIndex,
-} from '../data/excel/index.js'
+  computed,
+  defineAsyncComponent,
+  nextTick,
+  onBeforeUnmount,
+  onMounted,
+  ref,
+  shallowRef,
+  watch,
+} from 'vue'
+import { useDebouncedRef } from './composables/useDebouncedRef.js'
+import {
+  datasetDefinitions,
+  libraryCategories as categories,
+  loadLibraryDatasetEntry,
+  loadLibrarySearchIndex,
+  navigationGroups,
+} from './domain/library.js'
+import { pronunciationFor, typeLabel, wordKey } from './domain/words.js'
+import { createPronunciationService } from './services/pronunciation.js'
+import { readPracticeState, writePracticeState } from './services/practiceState.js'
+import {
+  normalizeSearchKeyword,
+  searchGlobalIndex,
+  wordMatchesKeyword,
+} from './utils/search.js'
 
-const categoryNavigationOrder = [
-  'high-school-entrance',
-  'college-entrance',
-  'cet4',
-  'cet6',
-  'tem8',
-  'ielts',
-  'toefl',
-  'new-concept-english',
-]
-const datasetTypeOrder = { vocabulary: 0, phrase: 1, course: 2 }
-const datasetById = new Map(excelDatasets.map((dataset) => [dataset.id, dataset]))
-const navigationGroups = [...excelCategories]
-  .sort((left, right) =>
-    categoryNavigationOrder.indexOf(left.id) - categoryNavigationOrder.indexOf(right.id),
-  )
-  .map((category) => ({
-    ...category,
-    options: category.datasets
-      .map((id) => datasetById.get(id))
-      .sort((left, right) =>
-        (datasetTypeOrder[left.type] ?? 9) - (datasetTypeOrder[right.type] ?? 9),
-      )
-      .map((dataset) => ({
-        ...dataset,
-        description: `${category.label} · ${dataset.label}，共 ${dataset.count.toLocaleString()} 条`,
-        async load() {
-          const entries = await loadDataset(dataset.id)
-          return {
-            default: entries.map((entry) => ({
-              ...entry,
-              __categoryId: category.id,
-              __categoryLabel: category.label,
-              __datasetId: dataset.id,
-              __datasetLabel: dataset.label,
-              __type: dataset.type,
-            })),
-          }
-        },
-      })),
-  }))
-const categories = navigationGroups.flatMap((group) => group.options)
+// The canvas animation is only needed in practice mode. Keeping it async removes
+// its setup code from the library page's critical JavaScript path.
+const ParticleBackground = defineAsyncComponent(() =>
+  import('./components/ParticleBackground.vue'),
+)
 
-function wordKey(word) {
-  return `${word?.__datasetId ?? 'unknown'}:${word?.term ?? ''}`
-}
-
-function pronunciationFor(word, lang = 'en-GB') {
-  if (!word) return ''
-  return lang === 'en-US'
-    ? word.americanPronunciation || word.britishPronunciation || ''
-    : word.britishPronunciation || word.americanPronunciation || ''
-}
-
-function typeLabel(word) {
-  return {
-    vocabulary: '词汇',
-    phrase: '词组',
-    course: '课程词汇',
-  }[word?.__type] ?? '词条'
-}
-
-function searchValues(word) {
-  return [
-    word.term,
-    word.britishPronunciation,
-    word.americanPronunciation,
-    word.definition,
-    word.exampleSentence,
-    word.exampleTranslation,
-    word.__datasetLabel,
-  ]
-}
-
-const STORAGE_KEY = 'study-english:practice-state:v2'
-const LEGACY_STORAGE_KEY = 'study-english:practice-state:v1'
-const PUBLIC_AUDIO_STREAM_BASE_URL = 'https://dict.youdao.com/dictvoice'
-const PROJECT_AUDIO_ROOT_URL = `${import.meta.env.BASE_URL}data/audio/`
-const DEVICE_SPEECH_RATE = 0.72
-const projectAudioIndexPromises = new Map()
-
-function readCachedState() {
-  try {
-    const currentState = localStorage.getItem(STORAGE_KEY)
-    if (currentState) return JSON.parse(currentState)
-
-    const legacyState = JSON.parse(localStorage.getItem(LEGACY_STORAGE_KEY) || '{}')
-    if (Object.keys(legacyState).length) {
-      return {
-        ...legacyState,
-        version: 2,
-        settings: {
-          ...legacyState.settings,
-          accent: 'en-GB',
-        },
-      }
-    }
-
-    return {}
-  } catch (error) {
-    console.warn('无法读取本地练习记录，将使用默认设置。', error)
-    return {}
-  }
-}
-
-const cachedState = readCachedState()
+const cachedState = readPracticeState()
 const cachedSettings = cachedState.settings ?? {}
 const initialCategory = categories.find((item) => item.id === cachedState.activeCategoryId)
   ?? categories[0]
@@ -131,13 +50,16 @@ const hasNextPracticeDataset = computed(() =>
   activePracticeDatasetIndex.value >= 0
     && activePracticeDatasetIndex.value < categories.length - 1,
 )
-const words = ref([])
-const selectedWord = ref(null)
+// Vocabulary collections are immutable after loading. shallowRef avoids creating
+// reactive proxies for thousands of records while still reacting to list swaps.
+const words = shallowRef([])
+const selectedWord = shallowRef(null)
 const detailPanel = ref(null)
 const query = ref('')
+const debouncedQuery = useDebouncedRef(query)
 const globalSearchMode = ref(false)
 const globalSearchLoading = ref(false)
-const globalSearchResults = ref([])
+const globalSearchResults = shallowRef([])
 const globalSearchKeyword = ref('')
 const globalSearchError = ref('')
 const selectedWordLoading = ref(false)
@@ -153,6 +75,9 @@ const particlesEnabled = ref(cachedSettings.particlesEnabled ?? true)
 const randomPractice = ref(cachedSettings.randomPractice ?? false)
 const trackErrors = ref(cachedSettings.trackErrors ?? true)
 const hideWord = ref(cachedSettings.hideWord ?? false)
+const pronunciation = createPronunciationService({
+  isDictionaryEnabled: () => dictionaryPronunciationEnabled.value,
+})
 const practiceIndex = ref(0)
 const wrongPracticeMode = ref(false)
 const wrongPracticeIndex = ref(0)
@@ -196,50 +121,39 @@ let practiceFocusScrollTimer
 let practiceViewportBaselineHeight = 0
 let practiceViewportContracted = false
 let mobileCardCooldownUntil = 0
-let activeDictionaryAudio
-let pronunciationRequestId = 0
 let selectedWordRequestId = 0
 let loadMoreFrame
-let speechVoices = []
 
 function saveCachedState() {
   if (!cacheReady) return
 
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({
-      version: 2,
-      activeCategoryId: activeCategory.value.id,
-      progressByCategory: progressByCategory.value,
-      browseProgressByCategory: browseProgressByCategory.value,
-      wrongWordsByCategory: wrongWordsByCategory.value,
-      settings: {
-        accent: accent.value,
-        dictionaryPronunciationEnabled: dictionaryPronunciationEnabled.value,
-        autoRead: autoRead.value,
-        recordProgress: recordProgress.value,
-        particlesEnabled: particlesEnabled.value,
-        randomPractice: randomPractice.value,
-        trackErrors: trackErrors.value,
-        hideWord: hideWord.value,
-      },
-      updatedAt: new Date().toISOString(),
-    }))
-  } catch (error) {
-    console.warn('无法保存本地练习记录。', error)
-  }
+  writePracticeState({
+    version: 2,
+    activeCategoryId: activeCategory.value.id,
+    progressByCategory: progressByCategory.value,
+    browseProgressByCategory: browseProgressByCategory.value,
+    wrongWordsByCategory: wrongWordsByCategory.value,
+    settings: {
+      accent: accent.value,
+      dictionaryPronunciationEnabled: dictionaryPronunciationEnabled.value,
+      autoRead: autoRead.value,
+      recordProgress: recordProgress.value,
+      particlesEnabled: particlesEnabled.value,
+      randomPractice: randomPractice.value,
+      trackErrors: trackErrors.value,
+      hideWord: hideWord.value,
+    },
+    updatedAt: new Date().toISOString(),
+  })
 }
 
 const filteredWords = computed(() => {
   if (globalSearchMode.value) return globalSearchResults.value
 
-  const keyword = query.value.trim().toLowerCase()
+  const keyword = normalizeSearchKeyword(debouncedQuery.value)
   if (!keyword) return words.value
 
-  return words.value.filter((item) => {
-    return searchValues(item).some((value) =>
-      String(value ?? '').toLowerCase().includes(keyword),
-    )
-  })
+  return words.value.filter((item) => wordMatchesKeyword(item, keyword))
 })
 
 const visibleWords = computed(() => filteredWords.value.slice(0, visibleCount.value))
@@ -373,8 +287,7 @@ async function selectCategory(category) {
   activeCategory.value = category
 
   try {
-    const module = await category.load()
-    words.value = module.default
+    words.value = await category.load()
     restoreBrowseSelection(category.id, words.value)
     const legacyIndex = Number(localStorage.getItem(`study-progress:${category.id}`))
     const savedIndex = Number(progressByCategory.value[category.id] ?? legacyIndex)
@@ -412,7 +325,7 @@ function handleSearchInput() {
 }
 
 async function executeGlobalSearch() {
-  const keyword = query.value.trim().toLowerCase()
+  const keyword = normalizeSearchKeyword(query.value)
   if (!keyword || globalSearchLoading.value) return
 
   globalSearchLoading.value = true
@@ -421,31 +334,8 @@ async function executeGlobalSearch() {
   resetBrowseNavigation()
 
   try {
-    const searchIndex = await loadSearchIndex()
-    const results = []
-
-    for (const dataset of excelDatasets) {
-      const terms = searchIndex.datasets[dataset.id] ?? []
-      const sourceMatches = [dataset.label, dataset.categoryLabel]
-        .some((value) => value.toLowerCase().includes(keyword))
-
-      terms.forEach((term, rowIndex) => {
-        if (!sourceMatches && !term.toLowerCase().includes(keyword)) return
-
-        results.push({
-          term,
-          britishPronunciation: '',
-          americanPronunciation: '',
-          definition: '',
-          __categoryId: dataset.categoryId,
-          __categoryLabel: dataset.categoryLabel,
-          __datasetId: dataset.id,
-          __datasetLabel: dataset.label,
-          __type: dataset.type,
-          __searchRowIndex: rowIndex,
-        })
-      })
-    }
+    const searchIndex = await loadLibrarySearchIndex()
+    const results = searchGlobalIndex(searchIndex, datasetDefinitions, keyword)
 
     globalSearchResults.value = results
     globalSearchKeyword.value = query.value.trim()
@@ -495,21 +385,16 @@ async function selectWord(word) {
   if (!selectedWordLoading.value) return
 
   try {
-    const entries = await loadDataset(word.__datasetId)
-    const entry = entries[word.__searchRowIndex]
+    const entry = await loadLibraryDatasetEntry(word.__datasetId, word.__searchRowIndex)
     if (!entry) throw new Error(`Missing search result row: ${word.__datasetId}/${word.__searchRowIndex}`)
 
-    const hydratedWord = {
-      ...entry,
-      __categoryId: word.__categoryId,
-      __categoryLabel: word.__categoryLabel,
-      __datasetId: word.__datasetId,
-      __datasetLabel: word.__datasetLabel,
-      __type: word.__type,
-    }
     const resultIndex = globalSearchResults.value.indexOf(word)
-    if (resultIndex >= 0) globalSearchResults.value.splice(resultIndex, 1, hydratedWord)
-    if (requestId === selectedWordRequestId) selectedWord.value = hydratedWord
+    if (resultIndex >= 0) {
+      const updatedResults = [...globalSearchResults.value]
+      updatedResults[resultIndex] = entry
+      globalSearchResults.value = updatedResults
+    }
+    if (requestId === selectedWordRequestId) selectedWord.value = entry
   } catch (error) {
     if (requestId === selectedWordRequestId) {
       selectedWord.value = {
@@ -736,153 +621,8 @@ function selectMobileWord(word) {
   mobileWordListOpen.value = false
 }
 
-function refreshSpeechVoices() {
-  if ('speechSynthesis' in window) speechVoices = window.speechSynthesis.getVoices()
-}
-
-function selectPreferredVoice(lang) {
-  const voices = speechVoices.length ? speechVoices : window.speechSynthesis.getVoices()
-  const targetLang = lang.toLowerCase()
-  const preferredNames = targetLang === 'en-gb'
-    ? ['sonia', 'libby', 'ryan', 'george', 'hazel', 'daniel']
-    : ['aria', 'jenny', 'guy', 'samantha', 'alex', 'zira', 'david']
-
-  return voices
-    .map((voice) => {
-      const voiceLang = voice.lang.toLowerCase()
-      const voiceName = voice.name.toLowerCase()
-      let score = 0
-      if (voiceLang === targetLang) score += 100
-      else if (voiceLang.startsWith(targetLang.split('-')[0])) score += 20
-      if (preferredNames.some((name) => voiceName.includes(name))) score += 35
-      if (voice.localService) score += 5
-      return { voice, score }
-    })
-    .filter((item) => item.score > 0)
-    .sort((left, right) => right.score - left.score)[0]?.voice
-}
-
-function stopDictionaryAudio() {
-  pronunciationRequestId += 1
-  if (!activeDictionaryAudio) return
-  activeDictionaryAudio.pause()
-  activeDictionaryAudio.currentTime = 0
-  activeDictionaryAudio = undefined
-}
-
-function speakWithSystemVoice(text, lang, rate) {
-  if (!text || !('speechSynthesis' in window)) return
-
-  window.speechSynthesis.cancel()
-  const utterance = new SpeechSynthesisUtterance(text)
-  const preferredVoice = selectPreferredVoice(lang)
-
-  utterance.lang = lang
-  utterance.rate = rate
-  utterance.pitch = 1
-  if (preferredVoice) utterance.voice = preferredVoice
-  window.speechSynthesis.speak(utterance)
-}
-
-function getPublicAudioStreamUrl(text, lang) {
-  const normalizedText = String(text ?? '').trim().replace(/\s+/g, ' ')
-  if (!/[a-z]/i.test(normalizedText) || normalizedText.length > 320) return ''
-
-  const voiceType = lang.toLowerCase() === 'en-us' ? 2 : 1
-  return `${PUBLIC_AUDIO_STREAM_BASE_URL}?audio=${encodeURIComponent(normalizedText)}&type=${voiceType}`
-}
-
-function audioTypeForLanguage(lang) {
-  return String(lang ?? '').toLowerCase() === 'en-us' ? 2 : 1
-}
-
-async function loadProjectAudioIndex(audioType) {
-  if (!projectAudioIndexPromises.has(audioType)) {
-    const catalogUrl = `${PROJECT_AUDIO_ROOT_URL}type-${audioType}/catalog.json`
-    const indexPromise = fetch(catalogUrl, {
-      headers: { Accept: 'application/json' },
-      cache: 'force-cache',
-    }).then(async (response) => {
-      if (!response.ok) throw new Error(`HTTP ${response.status}`)
-      const catalog = await response.json()
-      return new Map(
-        (Array.isArray(catalog?.entries) ? catalog.entries : [])
-          .filter((entry) => entry?.key && entry?.file)
-          .map((entry) => [entry.key, entry.file]),
-      )
-    }).catch((error) => {
-      console.warn(`项目 type-${audioType} 音频目录加载失败，将使用在线接口。`, error)
-      return new Map()
-    })
-    projectAudioIndexPromises.set(audioType, indexPromise)
-  }
-  return projectAudioIndexPromises.get(audioType)
-}
-
-async function getProjectAudioUrl(text, lang) {
-  const key = String(text ?? '').trim().toLocaleLowerCase('en-US')
-  if (!key || /\s/u.test(key)) return ''
-
-  const audioIndex = await loadProjectAudioIndex(audioTypeForLanguage(lang))
-  const file = audioIndex.get(key)
-  return file ? `${PROJECT_AUDIO_ROOT_URL}${file.replace(/^\/+/, '')}` : ''
-}
-
-function playAudioUrl(audioUrl, requestId, onFailure) {
-  if (!audioUrl || requestId !== pronunciationRequestId) return
-
-  let completed = false
-  const audio = new Audio(audioUrl)
-  audio.preload = 'auto'
-  activeDictionaryAudio = audio
-
-  const handleFailure = () => {
-    if (completed) return
-    completed = true
-    if (activeDictionaryAudio === audio) activeDictionaryAudio = undefined
-    if (requestId === pronunciationRequestId) onFailure()
-  }
-
-  audio.addEventListener('ended', () => {
-    completed = true
-    if (activeDictionaryAudio === audio) activeDictionaryAudio = undefined
-  }, { once: true })
-  audio.addEventListener('error', handleFailure, { once: true })
-  audio.play().catch(handleFailure)
-}
-
 function speakDictionaryWord(text, lang) {
-  if (!text) return
-
-  stopDictionaryAudio()
-  window.speechSynthesis?.cancel()
-
-  if (!dictionaryPronunciationEnabled.value) {
-    speakWithSystemVoice(text, lang, DEVICE_SPEECH_RATE)
-    return
-  }
-
-  const requestId = pronunciationRequestId
-  let onlineFallbackStarted = false
-  let deviceFallbackStarted = false
-  const fallbackToDevice = () => {
-    if (deviceFallbackStarted || requestId !== pronunciationRequestId) return
-    deviceFallbackStarted = true
-    speakWithSystemVoice(text, lang, DEVICE_SPEECH_RATE)
-  }
-  const fallbackToOnlineAudio = () => {
-    if (onlineFallbackStarted || requestId !== pronunciationRequestId) return
-    onlineFallbackStarted = true
-    const onlineAudioUrl = getPublicAudioStreamUrl(text, lang)
-    if (onlineAudioUrl) playAudioUrl(onlineAudioUrl, requestId, fallbackToDevice)
-    else fallbackToDevice()
-  }
-
-  getProjectAudioUrl(text, lang).then((projectAudioUrl) => {
-    if (requestId !== pronunciationRequestId) return
-    if (projectAudioUrl) playAudioUrl(projectAudioUrl, requestId, fallbackToOnlineAudio)
-    else fallbackToOnlineAudio()
-  }).catch(fallbackToOnlineAudio)
+  pronunciation.speak(text, lang)
 }
 
 function speakWord(lang) {
@@ -1208,7 +948,13 @@ watch(
 )
 
 watch(dictionaryPronunciationEnabled, (enabled) => {
-  if (!enabled) stopDictionaryAudio()
+  if (!enabled) pronunciation.stop()
+})
+
+watch(debouncedQuery, () => {
+  // A new filter starts with one render batch even if the previous unfiltered
+  // list had already loaded many batches while scrolling.
+  visibleCount.value = 120
 })
 
 watch(wrongWords, (items) => {
@@ -1219,8 +965,8 @@ watch(wrongWords, (items) => {
 
 onMounted(() => {
   window.addEventListener('keydown', handleGlobalKeydown)
-  refreshSpeechVoices()
-  window.speechSynthesis?.addEventListener?.('voiceschanged', refreshSpeechVoices)
+  pronunciation.refreshVoices()
+  window.speechSynthesis?.addEventListener?.('voiceschanged', pronunciation.refreshVoices)
   mobileMediaQuery = window.matchMedia('(max-width: 720px)')
   updateMobileCardMode(mobileMediaQuery)
   mobileMediaQuery.addEventListener?.('change', updateMobileCardMode)
@@ -1229,8 +975,8 @@ onMounted(() => {
 })
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', handleGlobalKeydown)
-  window.speechSynthesis?.removeEventListener?.('voiceschanged', refreshSpeechVoices)
-  stopDictionaryAudio()
+  window.speechSynthesis?.removeEventListener?.('voiceschanged', pronunciation.refreshVoices)
+  pronunciation.stop()
   window.speechSynthesis?.cancel()
   mobileMediaQuery?.removeEventListener?.('change', updateMobileCardMode)
   window.visualViewport?.removeEventListener('resize', syncPracticeViewportHeight)
