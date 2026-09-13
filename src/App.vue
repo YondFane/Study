@@ -1048,10 +1048,10 @@ selectCategory(initialCategory)
 <template>
   <main :class="['page-shell', { 'practice-shell': viewMode === 'practice' }]">
     <nav v-if="viewMode === 'library'" class="nav">
-      <a class="brand" href="#" aria-label="Study English 首页">
+      <a class="brand" href="#" aria-label="Study 首页">
         <span class="brand-mark">S</span>
         <span>
-          <b>Study English</b>
+          <b>Study</b>
           <small>Word Library</small>
         </span>
       </a>

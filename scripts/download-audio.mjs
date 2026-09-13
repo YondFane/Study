@@ -163,7 +163,7 @@ async function fetchAudio(entry) {
             Accept: 'audio/mpeg,audio/*;q=0.9,*/*;q=0.1',
             'User-Agent': candidate.provider === 'google-translate-tts'
               ? 'Mozilla/5.0'
-              : 'StudyEnglish/1.0 audio cache builder',
+              : 'Study/1.0 audio cache builder',
           },
           redirect: 'follow',
           signal: AbortSignal.timeout(requestTimeoutMs),

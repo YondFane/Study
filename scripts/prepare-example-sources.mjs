@@ -120,7 +120,7 @@ async function downloadFile(url, destination) {
   for (let attempt = 1; attempt <= 5; attempt += 1) {
     try {
       response = await fetch(url, {
-        headers: { 'User-Agent': 'StudyEnglish-example-source-builder/1.0' },
+        headers: { 'User-Agent': 'Study-example-source-builder/1.0' },
         signal: AbortSignal.timeout(15 * 60 * 1000),
       })
       break

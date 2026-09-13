@@ -1,8 +1,8 @@
-# StudyEnglish 项目记录
+# Study 项目记录
 
 ## 1. 项目概述
 
-StudyEnglish 是一个基于 Vue 3 和 Vite 的纯前端英语词汇学习网站。
+Study 是一个基于 Vue 3 和 Vite 的纯前端英语词汇学习网站。
 
 项目包含两个主要使用场景：
 

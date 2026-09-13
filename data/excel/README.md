@@ -2,7 +2,7 @@
 
 词库中的部分例句可能来自 Tatoeba CC0 或 Princeton WordNet 3.0，来源与授权说明见 `../examples/THIRD_PARTY_NOTICES.md`。发布或复制包含这些例句的词库时必须一并保留该说明。
 
-本目录保存从 `English_Temp` 中 16 个 Excel 文件转换得到的词库，共 8 个分类、37,824 条记录。数据采用 UTF-8 JSON，供 StudyEnglish 的导航、词库浏览、全局搜索和练习页面按需加载。
+本目录保存从 `English_Temp` 中 16 个 Excel 文件转换得到的词库，共 8 个分类、37,824 条记录。数据采用 UTF-8 JSON，供 Study 的导航、词库浏览、全局搜索和练习页面按需加载。
 
 ## 入口文件
 
