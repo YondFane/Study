@@ -20,6 +20,8 @@ async function setup({ cached = {}, disabledStorage = false } = {}) {
   const detailRequests = []
   const component = mountLogic('../../src/App.vue', {
     './composables/useDebouncedRef.js': { useDebouncedRef },
+    './components/StockAccess.vue': { default: {} },
+    './components/StockPage.vue': { default: {} },
     './components/VirtualWordList.vue': { default: {} },
     './domain/library.js': {
       libraryCategories: [initial], navigationGroups: [{ id: 'group', options: [initial] }],
@@ -170,4 +172,34 @@ test('卸载组件时取消尚未执行的自动跳题', async () => {
   app.unmount(); app.clock.runTimers()
   assert.equal(app.state.practiceIndex.value, 0)
   assert.equal(app.state.submissionPending.value, false)
+})
+
+test('入口顺序完整时打开股票视图并可返回', async t => {
+  const app = await setup(); t.after(app.unmount)
+  const s = app.state
+  s.registerHiddenMarkClick()
+  s.registerHiddenMarkClick()
+  s.tryOpenStockView()
+  assert.equal(s.viewMode.value, 'library')
+  s.registerHiddenMarkClick()
+  s.tryOpenStockView()
+  assert.equal(s.viewMode.value, 'stock-lock')
+  assert.equal(document.title, '验证 · Study')
+  s.unlockStockView()
+  assert.equal(s.viewMode.value, 'stock')
+  assert.equal(document.title, '股票 · Study')
+  s.closeStockView()
+  assert.equal(s.viewMode.value, 'library')
+  assert.equal(document.title, 'Study')
+})
+
+test('入口激活后超时则不再打开股票视图', async t => {
+  const app = await setup(); t.after(app.unmount)
+  const s = app.state
+  s.registerHiddenMarkClick()
+  s.registerHiddenMarkClick()
+  s.registerHiddenMarkClick()
+  app.clock.runTimers()
+  s.tryOpenStockView()
+  assert.equal(s.viewMode.value, 'library')
 })

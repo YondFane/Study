@@ -52,7 +52,10 @@ a { color: inherit; text-decoration: none; }
   background: #ec6e4c;
   font-family: Georgia, serif;
   font-size: 21px;
+  user-select: none;
 }
+
+.brand b { user-select: none; }
 
 .nav-tabs {
   min-width: 0;

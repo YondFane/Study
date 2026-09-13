@@ -10,6 +10,8 @@ import {
   watch,
 } from 'vue'
 import { useDebouncedRef } from './composables/useDebouncedRef.js'
+import StockAccess from './components/StockAccess.vue'
+import StockPage from './components/StockPage.vue'
 import VirtualWordList from './components/VirtualWordList.vue'
 import {
   datasetDefinitions,
@@ -128,6 +130,45 @@ let selectedWordRequestId = 0
 let globalSearchRequestId = 0
 let categoryRequestId = 0
 let answerAdvanceTimer
+let hiddenMarkClickCount = 0
+let hiddenMarkClickTimer
+let hiddenEntryExpiresAt = 0
+
+function registerHiddenMarkClick() {
+  window.clearTimeout(hiddenMarkClickTimer)
+  hiddenMarkClickCount += 1
+  if (hiddenMarkClickCount === 3) {
+    hiddenMarkClickCount = 0
+    hiddenEntryExpiresAt = Date.now() + 3000
+    hiddenMarkClickTimer = window.setTimeout(() => {
+      hiddenEntryExpiresAt = 0
+    }, 3000)
+    return
+  }
+  hiddenMarkClickTimer = window.setTimeout(() => {
+    hiddenMarkClickCount = 0
+  }, 900)
+}
+
+function tryOpenStockView() {
+  if (!hiddenEntryExpiresAt || Date.now() > hiddenEntryExpiresAt) return
+  window.clearTimeout(hiddenMarkClickTimer)
+  hiddenEntryExpiresAt = 0
+  hiddenMarkClickCount = 0
+  pronunciation.stop()
+  viewMode.value = 'stock-lock'
+  document.title = '验证 · Study'
+}
+
+function unlockStockView() {
+  viewMode.value = 'stock'
+  document.title = '股票 · Study'
+}
+
+function closeStockView() {
+  viewMode.value = 'library'
+  document.title = 'Study'
+}
 
 function cancelPendingAnswer() {
   // 切词、切换练习模式和离开页面时取消旧题的自动跳转。
@@ -796,6 +837,7 @@ function focusAnswerInput() {
 
 function scrollPracticeInputIntoView(delay = 0) {
   window.clearTimeout(practiceFocusScrollTimer)
+  window.clearTimeout(hiddenMarkClickTimer)
   practiceFocusScrollTimer = window.setTimeout(() => {
     if (!practiceKeyboardOpen.value) return
     answerInput.value?.closest('.answer-form')?.scrollIntoView({
@@ -1048,10 +1090,10 @@ selectCategory(initialCategory)
 <template>
   <main :class="['page-shell', { 'practice-shell': viewMode === 'practice' }]">
     <nav v-if="viewMode === 'library'" class="nav">
-      <a class="brand" href="#" aria-label="Study 首页">
-        <span class="brand-mark">S</span>
+      <a class="brand" href="#" aria-label="Study 首页" @click.prevent>
+        <span class="brand-mark" @click.stop.prevent="registerHiddenMarkClick">S</span>
         <span>
-          <b>Study</b>
+          <b @click.stop.prevent="tryOpenStockView">Study</b>
           <small>Word Library</small>
         </span>
       </a>
@@ -1438,7 +1480,7 @@ selectCategory(initialCategory)
     </section>
 
     <section
-      v-else
+      v-else-if="viewMode === 'practice'"
       :class="['practice-view', { 'practice-keyboard-open': practiceKeyboardOpen }]"
     >
       <ParticleBackground :enabled="particlesEnabled" />
@@ -1673,5 +1715,12 @@ selectCategory(initialCategory)
         </div>
       </footer>
     </section>
+
+    <StockAccess
+      v-else-if="viewMode === 'stock-lock'"
+      @back="closeStockView"
+      @unlock="unlockStockView"
+    />
+    <StockPage v-else @back="closeStockView" />
   </main>
 </template>
