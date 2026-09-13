@@ -10,6 +10,7 @@ import {
   watch,
 } from 'vue'
 import { useDebouncedRef } from './composables/useDebouncedRef.js'
+import VirtualWordList from './components/VirtualWordList.vue'
 import {
   datasetDefinitions,
   libraryCategories as categories,
@@ -19,7 +20,7 @@ import {
 } from './domain/library.js'
 import { pronunciationFor, typeLabel, wordKey } from './domain/words.js'
 import { createPronunciationService } from './services/pronunciation.js'
-import { readPracticeState, writePracticeState } from './services/practiceState.js'
+import { readLegacyPracticeIndex, readPracticeState, writePracticeState } from './services/practiceState.js'
 import {
   normalizeSearchKeyword,
   searchGlobalIndex,
@@ -63,7 +64,8 @@ const globalSearchResults = shallowRef([])
 const globalSearchKeyword = ref('')
 const globalSearchError = ref('')
 const selectedWordLoading = ref(false)
-const visibleCount = ref(120)
+const desktopWordList = ref(null)
+const mobileWordList = ref(null)
 const loading = ref(false)
 const loadError = ref('')
 const viewMode = ref('library')
@@ -87,6 +89,7 @@ const answerInput = ref(null)
 const practiceKeyboardOpen = ref(false)
 const letterShakeVersions = ref({})
 const feedback = ref(null)
+const submissionPending = ref(false)
 const wrongWords = ref([])
 const jumpNumber = ref(1)
 const progressByCategory = ref(cachedState.progressByCategory ?? {})
@@ -122,7 +125,24 @@ let practiceViewportBaselineHeight = 0
 let practiceViewportContracted = false
 let mobileCardCooldownUntil = 0
 let selectedWordRequestId = 0
-let loadMoreFrame
+let globalSearchRequestId = 0
+let categoryRequestId = 0
+let answerAdvanceTimer
+
+function cancelPendingAnswer() {
+  // 切词、切换练习模式和离开页面时取消旧题的自动跳转。
+  window.clearTimeout(answerAdvanceTimer)
+  answerAdvanceTimer = undefined
+  submissionPending.value = false
+}
+
+function invalidateSearchRequests() {
+  // 只让最新搜索及其详情写回页面；动态 import 无法取消，用版本号隔离旧请求。
+  globalSearchRequestId += 1
+  selectedWordRequestId += 1
+  globalSearchLoading.value = false
+  selectedWordLoading.value = false
+}
 
 function saveCachedState() {
   if (!cacheReady) return
@@ -156,8 +176,6 @@ const filteredWords = computed(() => {
   return words.value.filter((item) => wordMatchesKeyword(item, keyword))
 })
 
-const visibleWords = computed(() => filteredWords.value.slice(0, visibleCount.value))
-const hasMore = computed(() => visibleCount.value < filteredWords.value.length)
 const selectedBrowseIndex = computed(() => filteredWords.value.indexOf(selectedWord.value))
 const canBrowsePrevious = computed(() => selectedBrowseIndex.value > 0)
 const canBrowseNext = computed(() =>
@@ -240,7 +258,8 @@ function restoreBrowseSelection(categoryId, entries = words.value) {
     ? Math.min(Math.max(savedIndex, 0), Math.max(entries.length - 1, 0))
     : 0
 
-  visibleCount.value = Math.max(120, restoredIndex + 1)
+  selectedWordRequestId += 1
+  selectedWordLoading.value = false
   selectedWord.value = entries[restoredIndex] ?? null
   nextTick(scrollSelectedWordIntoView)
 }
@@ -256,7 +275,9 @@ function handleDatasetSelect(event) {
 }
 
 async function selectCategory(category) {
-  if (loading.value) return
+  if (loading.value && activeCategory.value.id === category.id) return
+  invalidateSearchRequests()
+  cancelPendingAnswer()
   if (activeCategory.value.id === category.id && words.value.length) {
     if (globalSearchMode.value) {
       globalSearchMode.value = false
@@ -269,7 +290,7 @@ async function selectCategory(category) {
     return
   }
 
-  if (words.value.length) {
+  if (!loading.value && words.value.length) {
     wrongWordsByCategory.value[activeCategory.value.id] = wrongWords.value.map(wordKey)
   }
 
@@ -277,19 +298,25 @@ async function selectCategory(category) {
   wrongPracticeIndex.value = 0
   wrongPracticeCompleted.value = false
   loading.value = true
+  const requestId = ++categoryRequestId
+  words.value = []
+  selectedWord.value = null
+  wrongWords.value = []
   loadError.value = ''
   globalSearchMode.value = false
   globalSearchResults.value = []
   globalSearchKeyword.value = ''
   globalSearchError.value = ''
   query.value = ''
-  visibleCount.value = 120
   activeCategory.value = category
 
   try {
-    words.value = await category.load()
+    const entries = await category.load()
+    // 快速切换分类时，较慢的旧词库不能覆盖最后一次选择。
+    if (requestId !== categoryRequestId) return
+    words.value = entries
     restoreBrowseSelection(category.id, words.value)
-    const legacyIndex = Number(localStorage.getItem(`study-progress:${category.id}`))
+    const legacyIndex = readLegacyPracticeIndex(category.id)
     const savedIndex = Number(progressByCategory.value[category.id] ?? legacyIndex)
     practiceIndex.value = recordProgress.value && Number.isInteger(savedIndex)
       ? Math.min(Math.max(savedIndex, 0), Math.max(words.value.length - 1, 0))
@@ -304,17 +331,21 @@ async function selectCategory(category) {
     cacheReady = true
     saveCachedState()
   } catch (error) {
+    if (requestId !== categoryRequestId) return
     words.value = []
     selectedWord.value = null
     loadError.value = '词库加载失败，请刷新页面重试。'
     console.error(error)
   } finally {
-    loading.value = false
-    nextTick(scrollSelectedWordIntoView)
+    if (requestId === categoryRequestId) {
+      loading.value = false
+      nextTick(scrollSelectedWordIntoView)
+    }
   }
 }
 
 function handleSearchInput() {
+  invalidateSearchRequests()
   globalSearchError.value = ''
   if (!globalSearchMode.value || query.value.trim() === globalSearchKeyword.value) return
 
@@ -326,27 +357,31 @@ function handleSearchInput() {
 
 async function executeGlobalSearch() {
   const keyword = normalizeSearchKeyword(query.value)
-  if (!keyword || globalSearchLoading.value) return
+  if (!keyword || globalSearchLoading.value || loading.value) return
 
+  invalidateSearchRequests()
+  const requestId = globalSearchRequestId
+  const submittedQuery = query.value.trim()
   globalSearchLoading.value = true
   globalSearchError.value = ''
-  visibleCount.value = 120
   resetBrowseNavigation()
 
   try {
     const searchIndex = await loadLibrarySearchIndex()
+    if (requestId !== globalSearchRequestId) return
     const results = searchGlobalIndex(searchIndex, datasetDefinitions, keyword)
 
     globalSearchResults.value = results
-    globalSearchKeyword.value = query.value.trim()
+    globalSearchKeyword.value = submittedQuery
     globalSearchMode.value = true
     selectedWord.value = null
     if (results[0]) selectWord(results[0])
   } catch (error) {
+    if (requestId !== globalSearchRequestId) return
     globalSearchError.value = '全局搜索索引加载失败，请稍后重试。'
     console.error(error)
   } finally {
-    globalSearchLoading.value = false
+    if (requestId === globalSearchRequestId) globalSearchLoading.value = false
   }
 }
 
@@ -386,6 +421,7 @@ async function selectWord(word) {
 
   try {
     const entry = await loadLibraryDatasetEntry(word.__datasetId, word.__searchRowIndex)
+    if (requestId !== selectedWordRequestId) return
     if (!entry) throw new Error(`Missing search result row: ${word.__datasetId}/${word.__searchRowIndex}`)
 
     const resultIndex = globalSearchResults.value.indexOf(word)
@@ -408,17 +444,6 @@ async function selectWord(word) {
   }
 }
 
-function handleWordListScroll(event) {
-  const list = event.currentTarget
-  const distanceToBottom = list.scrollHeight - list.scrollTop - list.clientHeight
-  if (!hasMore.value || distanceToBottom > 240 || loadMoreFrame) return
-
-  loadMoreFrame = window.requestAnimationFrame(() => {
-    visibleCount.value += 120
-    loadMoreFrame = undefined
-  })
-}
-
 function isDetailAtBottom() {
   const panel = detailPanel.value
   if (!panel) return false
@@ -433,10 +458,9 @@ function resetBrowseNavigation() {
 
 function scrollSelectedWordIntoView() {
   nextTick(() => {
-    document.querySelector('.word-list > button.selected')?.scrollIntoView({
-      block: 'nearest',
-      behavior: 'smooth',
-    })
+    const index = selectedBrowseIndex.value
+    desktopWordList.value?.scrollToIndex(index)
+    mobileWordList.value?.scrollToIndex(index)
   })
 }
 
@@ -454,7 +478,6 @@ function browseAdjacentWord(direction) {
     return
   }
 
-  visibleCount.value = Math.max(visibleCount.value, targetIndex + 1)
   selectWord(list[targetIndex])
   browseNavigationCooldownUntil = Date.now() + 600
   resetBrowseNavigation()
@@ -638,6 +661,8 @@ function speakExampleSentence(sentence, lang = 'en-GB') {
 }
 
 function openPractice() {
+  if (loading.value || !words.value.length) return
+  cancelPendingAnswer()
   wrongPracticeMode.value = false
   wrongPracticeCompleted.value = false
 
@@ -665,6 +690,8 @@ function openPractice() {
 }
 
 function nextPracticeWord() {
+  cancelPendingAnswer()
+  if (loading.value) return
   const collection = practiceCollection.value
   if (!collection.length) return
 
@@ -692,6 +719,8 @@ function nextPracticeWord() {
 }
 
 function startWrongPractice() {
+  cancelPendingAnswer()
+  if (loading.value) return
   if (wrongPracticeMode.value) {
     wrongPracticeMode.value = false
     wrongPracticeCompleted.value = false
@@ -723,10 +752,11 @@ function startWrongPractice() {
   })
 }
 
-function completeWrongWord() {
-  const completedWord = practiceWord.value
+function completeWrongWord(completedWord) {
+  // 使用提交时绑定的词条，不能在延迟回调中重新读取另一道题。
   const removalIndex = wrongWords.value.findIndex((item) => wordKey(item) === wordKey(completedWord))
-  if (removalIndex >= 0) wrongWords.value.splice(removalIndex, 1)
+  if (removalIndex < 0) return
+  wrongWords.value.splice(removalIndex, 1)
 
   answer.value = ''
   letterShakeVersions.value = {}
@@ -748,6 +778,7 @@ function completeWrongWord() {
 }
 
 function returnToNormalPractice() {
+  cancelPendingAnswer()
   wrongPracticeCompleted.value = false
   answer.value = ''
   letterShakeVersions.value = {}
@@ -812,6 +843,10 @@ function triggerLetterShake(index) {
 }
 
 function handleAnswerInput(event) {
+  if (submissionPending.value) {
+    event.target.value = answer.value
+    return
+  }
   const cleanedValue = event.target.value
     .replace(/[^a-z]/gi, '')
     .slice(0, practiceAnswerTarget.value.length)
@@ -832,6 +867,7 @@ function handleAnswerInput(event) {
 }
 
 function submitAnswer() {
+  if (submissionPending.value || loading.value || !practiceWord.value || viewMode.value !== 'practice') return
   const expected = practiceAnswerTarget.value
   const actual = answer.value.trim().toLowerCase()
   if (!actual) {
@@ -844,10 +880,22 @@ function submitAnswer() {
       type: 'success',
       text: wrongPracticeMode.value ? '回答正确，已移出错题记录！' : '回答正确，很棒！',
     }
-    window.setTimeout(
-      wrongPracticeMode.value ? completeWrongWord : nextPracticeWord,
-      650,
-    )
+    // 同一题只创建一个计时器，并绑定词库、题目位置和练习模式。
+    const submittedWord = practiceWord.value
+    const submittedCategoryId = activeCategory.value.id
+    const submittedIndex = currentPracticeIndex.value
+    const submittedWrongMode = wrongPracticeMode.value
+    submissionPending.value = true
+    answerAdvanceTimer = window.setTimeout(() => {
+      cancelPendingAnswer()
+      if (viewMode.value !== 'practice' || loading.value
+        || activeCategory.value.id !== submittedCategoryId
+        || practiceWord.value !== submittedWord
+        || currentPracticeIndex.value !== submittedIndex
+        || wrongPracticeMode.value !== submittedWrongMode) return
+      if (submittedWrongMode) completeWrongWord(submittedWord)
+      else nextPracticeWord()
+    }, 650)
     return
   }
 
@@ -861,6 +909,8 @@ function submitAnswer() {
 }
 
 function resetPractice() {
+  cancelPendingAnswer()
+  if (loading.value) return
   if (wrongPracticeMode.value) {
     wrongPracticeIndex.value = 0
   } else {
@@ -875,6 +925,8 @@ function resetPractice() {
 }
 
 function jumpToWord() {
+  cancelPendingAnswer()
+  if (loading.value) return
   const target = Math.min(Math.max(Number(jumpNumber.value) || 1, 1), words.value.length)
   practiceIndex.value = target - 1
   jumpNumber.value = target
@@ -900,6 +952,7 @@ function handleGlobalKeydown(event) {
 }
 
 watch(practiceIndex, (index) => {
+  if (loading.value) return
   if (recordProgress.value && !randomPractice.value) {
     progressByCategory.value[activeCategory.value.id] = index
     saveCachedState()
@@ -951,14 +1004,13 @@ watch(dictionaryPronunciationEnabled, (enabled) => {
   if (!enabled) pronunciation.stop()
 })
 
-watch(debouncedQuery, () => {
-  // A new filter starts with one render batch even if the previous unfiltered
-  // list had already loaded many batches while scrolling.
-  visibleCount.value = 120
-})
+// 同步失效，防止同一轮事件中旧请求恰好完成并覆盖刚输入的内容。
+watch(query, handleSearchInput, { flush: 'sync' })
+watch([practiceWord, wrongPracticeMode, viewMode, activeCategory], cancelPendingAnswer, { flush: 'sync' })
+watch(viewMode, invalidateSearchRequests, { flush: 'sync' })
 
 watch(wrongWords, (items) => {
-  if (!cacheReady) return
+  if (!cacheReady || loading.value) return
   wrongWordsByCategory.value[activeCategory.value.id] = items.map(wordKey)
   saveCachedState()
 }, { deep: true })
@@ -974,6 +1026,9 @@ onMounted(() => {
   window.visualViewport?.addEventListener('resize', syncPracticeViewportHeight)
 })
 onBeforeUnmount(() => {
+  cancelPendingAnswer()
+  invalidateSearchRequests()
+  categoryRequestId += 1
   window.removeEventListener('keydown', handleGlobalKeydown)
   window.speechSynthesis?.removeEventListener?.('voiceschanged', pronunciation.refreshVoices)
   pronunciation.stop()
@@ -985,7 +1040,6 @@ onBeforeUnmount(() => {
   window.clearTimeout(mobileCardAnimationTimer)
   window.clearTimeout(mobileSwipeHintTimer)
   window.clearTimeout(practiceFocusScrollTimer)
-  window.cancelAnimationFrame(loadMoreFrame)
 })
 
 selectCategory(initialCategory)
@@ -1071,13 +1125,12 @@ selectCategory(initialCategory)
               v-model="query"
               type="search"
               placeholder="当前词库可搜释义；全库快速搜词条或来源"
-              @input="handleSearchInput"
               @keydown.enter.prevent="executeGlobalSearch"
             />
           </label>
           <button
             class="global-search-button"
-            :disabled="!query.trim() || globalSearchLoading"
+            :disabled="!query.trim() || globalSearchLoading || loading"
             @click="executeGlobalSearch"
           >
             {{ globalSearchLoading ? '搜索中…' : '全库搜词' }}
@@ -1104,21 +1157,13 @@ selectCategory(initialCategory)
         <div v-else-if="loadError" class="panel-state error">{{ loadError }}</div>
         <div v-else-if="!filteredWords.length" class="panel-state">没有找到匹配的词条</div>
 
-        <div v-else class="word-list" @scroll.passive="handleWordListScroll">
-          <button
-            v-for="(word, index) in visibleWords"
-            :key="`${wordKey(word)}-${index}`"
-            :class="{ selected: selectedWord === word }"
-            @click="selectWord(word)"
-          >
-            <span class="word-index">{{ String(index + 1).padStart(2, '0') }}</span>
-            <span class="word-name">{{ word.term }}</span>
-            <span class="word-phonetic">
-              {{ pronunciationFor(word) }}<template v-if="word.__datasetLabel"> · {{ word.__datasetLabel }}</template>
-            </span>
-            <span class="arrow">→</span>
-          </button>
-        </div>
+        <VirtualWordList
+          v-else
+          ref="desktopWordList"
+          :words="filteredWords"
+          :selected-word="selectedWord"
+          @select="selectWord"
+        />
       </aside>
 
       <article
@@ -1331,21 +1376,13 @@ selectCategory(initialCategory)
             </div>
             <button aria-label="关闭词条列表" @click="mobileWordListOpen = false">×</button>
           </header>
-          <div class="word-list mobile-word-list" @scroll.passive="handleWordListScroll">
-            <button
-              v-for="(word, index) in visibleWords"
-              :key="`mobile-${wordKey(word)}-${index}`"
-              :class="{ selected: selectedWord === word }"
-              @click="selectMobileWord(word)"
-            >
-              <span class="word-index">{{ String(index + 1).padStart(2, '0') }}</span>
-              <span class="word-name">{{ word.term }}</span>
-              <span class="word-phonetic">
-                {{ pronunciationFor(word) }}<template v-if="word.__datasetLabel"> · {{ word.__datasetLabel }}</template>
-              </span>
-              <span class="arrow">→</span>
-            </button>
-          </div>
+          <VirtualWordList
+            ref="mobileWordList"
+            class="mobile-word-list"
+            :words="filteredWords"
+            :selected-word="selectedWord"
+            @select="selectMobileWord"
+          />
         </section>
       </div>
 
@@ -1447,7 +1484,9 @@ selectCategory(initialCategory)
         </div>
       </header>
 
-      <div v-if="wrongPracticeCompleted" class="wrong-practice-complete">
+      <div v-if="loading" class="panel-state">正在载入词库…</div>
+      <div v-else-if="loadError" class="panel-state error">{{ loadError }}</div>
+      <div v-else-if="wrongPracticeCompleted" class="wrong-practice-complete">
         <span aria-hidden="true">✓</span>
         <p>WRONG WORDS CLEARED</p>
         <h2>错题练习完成</h2>
@@ -1535,6 +1574,7 @@ selectCategory(initialCategory)
               enterkeyhint="done"
               spellcheck="false"
               :maxlength="practiceAnswerTarget.length"
+              :readonly="submissionPending"
               aria-label="输入词条字母"
               @focus="handlePracticeInputFocus"
               @blur="handlePracticeInputBlur"
@@ -1549,7 +1589,7 @@ selectCategory(initialCategory)
           <button class="action-blue" @click="hideWord = !hideWord">
             {{ hideWord ? '显示词条' : '隐藏词条' }} <kbd>2</kbd>
           </button>
-          <button class="action-green" @click="submitAnswer">提交 <kbd>Enter</kbd></button>
+          <button class="action-green" :disabled="submissionPending" @click="submitAnswer">提交 <kbd>Enter</kbd></button>
           <button class="action-muted" @click="nextPracticeWord">随机/下一词</button>
           <button class="action-danger" @click="startWrongPractice">
             {{ wrongPracticeMode ? '退出错题练习' : '错题练习' }}

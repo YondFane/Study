@@ -2,23 +2,44 @@ const CACHE_PREFIX = 'study-english-runtime-'
 const CACHE_NAME = `${CACHE_PREFIX}v1`
 const MAX_CACHED_FILES = 80
 
+async function openRuntimeCache() {
+  try {
+    return await caches.open(CACHE_NAME)
+  } catch {
+    return undefined
+  }
+}
+
+async function matchCached(cache, request) {
+  try {
+    return await cache?.match(request)
+  } catch {
+    return undefined
+  }
+}
+
 async function trimCache(cache) {
   const keys = await cache.keys()
   if (keys.length <= MAX_CACHED_FILES) return
   await Promise.all(keys.slice(0, keys.length - MAX_CACHED_FILES).map((key) => cache.delete(key)))
 }
 
-async function cacheResponse(cache, request, response) {
+function cacheResponse(event, cachePromise, request, response) {
   if (!response?.ok || response.type === 'opaque') return response
-  await cache.put(request, response.clone())
-  await trimCache(cache)
+  // 先复制响应并交给后台写入；配额不足、缓存损坏都不能拖慢或吞掉网络响应。
+  const copy = response.clone()
+  event.waitUntil(cachePromise.then(async (cache) => {
+    if (!cache) return
+    await cache.put(request, copy)
+    await trimCache(cache)
+  }).catch(() => undefined))
   return response
 }
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(CACHE_NAME)
-      .then((cache) => cache.add(new Request(self.registration.scope, { cache: 'reload' })))
+    openRuntimeCache()
+      .then((cache) => cache?.add(new Request(self.registration.scope, { cache: 'reload' })))
       .catch(() => undefined),
   )
 })
@@ -30,7 +51,8 @@ self.addEventListener('activate', (event) => {
         names
           .filter((name) => name.startsWith(CACHE_PREFIX) && name !== CACHE_NAME)
           .map((name) => caches.delete(name)),
-      )),
+      ))
+      .catch(() => undefined),
   )
 })
 
@@ -44,12 +66,15 @@ self.addEventListener('fetch', (event) => {
 
   if (request.mode === 'navigate') {
     event.respondWith((async () => {
-      const cache = await caches.open(CACHE_NAME)
+      const cachePromise = openRuntimeCache()
       try {
         const response = await fetch(request)
-        return cacheResponse(cache, request, response)
-      } catch {
-        return (await cache.match(request)) || cache.match(self.registration.scope)
+        return cacheResponse(event, cachePromise, request, response)
+      } catch (error) {
+        const cache = await cachePromise
+        const cached = (await matchCached(cache, request)) || (await matchCached(cache, self.registration.scope))
+        if (cached) return cached
+        throw error
       }
     })())
     return
@@ -58,9 +83,9 @@ self.addEventListener('fetch', (event) => {
   if (!url.pathname.includes('/assets/')) return
 
   event.respondWith((async () => {
-    const cache = await caches.open(CACHE_NAME)
-    const cached = await cache.match(request)
+    const cachePromise = openRuntimeCache()
+    const cached = await matchCached(await cachePromise, request)
     if (cached) return cached
-    return cacheResponse(cache, request, await fetch(request))
+    return cacheResponse(event, cachePromise, request, await fetch(request))
   })())
 })
