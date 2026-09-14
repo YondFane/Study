@@ -10,7 +10,6 @@ import {
   watch,
 } from 'vue'
 import { useDebouncedRef } from './composables/useDebouncedRef.js'
-import StockAccess from './components/StockAccess.vue'
 import VirtualWordList from './components/VirtualWordList.vue'
 import {
   datasetDefinitions,
@@ -156,11 +155,6 @@ function tryOpenStockView() {
   hiddenEntryExpiresAt = 0
   hiddenMarkClickCount = 0
   pronunciation.stop()
-  viewMode.value = 'stock-lock'
-  document.title = '验证 · Study'
-}
-
-function unlockStockView() {
   viewMode.value = 'stock'
   document.title = '股票 · Study'
 }
@@ -1716,11 +1710,6 @@ selectCategory(initialCategory)
       </footer>
     </section>
 
-    <StockAccess
-      v-else-if="viewMode === 'stock-lock'"
-      @back="closeStockView"
-      @unlock="unlockStockView"
-    />
     <StockPage v-else @back="closeStockView" />
   </main>
 </template>
