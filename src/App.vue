@@ -11,7 +11,6 @@ import {
 } from 'vue'
 import { useDebouncedRef } from './composables/useDebouncedRef.js'
 import StockAccess from './components/StockAccess.vue'
-import StockPage from './components/StockPage.vue'
 import VirtualWordList from './components/VirtualWordList.vue'
 import {
   datasetDefinitions,
@@ -34,6 +33,7 @@ import {
 const ParticleBackground = defineAsyncComponent(() =>
   import('./components/ParticleBackground.vue'),
 )
+const StockPage = defineAsyncComponent(() => import('./components/StockPage.vue'))
 
 const cachedState = readPracticeState()
 const cachedSettings = cachedState.settings ?? {}
