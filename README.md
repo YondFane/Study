@@ -4,8 +4,8 @@ Study 是一个基于 Vue 3 和 Vite 构建的纯前端英语词汇学习网站�
 
 ## 访问地址
 
-- 在线访问：<https://yondfane.github.io/StudyEnglish>
-- GitHub 仓库：<https://github.com/YondFane/StudyEnglish>
+- 在线访问：<https://yondfane.github.io/Study>
+- GitHub 仓库：<https://github.com/YondFane/Study>
 
 ## 项目数据
 
@@ -132,7 +132,7 @@ data/audio/type-2/lookup/       -> dist/data/audio/type-2/lookup/
 data/audio/type-2/files/        -> dist/data/audio/type-2/files/
 ```
 
-开发服务器通过相同的 `/StudyEnglish/data/audio/` 地址读取源音频，因此开发环境和 GitHub Pages 使用一致的播放路径。
+开发服务器通过相同的 `/Study/data/audio/` 地址读取源音频，因此开发环境和 GitHub Pages 使用一致的播放路径。
 
 ### 状态管理
 
@@ -143,7 +143,7 @@ data/audio/type-2/files/        -> dist/data/audio/type-2/files/
 Vite 的基础路径固定为：
 
 ```js
-base: '/StudyEnglish/'
+base: '/Study/'
 ```
 
 脚本、样式、动态词库、音频目录和 Service Worker 都通过该基础路径访问。修改仓库名或部署路径时，需要同步修改 `vite.config.js`。
@@ -161,7 +161,7 @@ base: '/StudyEnglish/'
 ## 项目目录
 
 ```text
-StudyEnglish/
+Study/
 ├─ .github/workflows/deploy.yml       # GitHub Pages 自动部署
 ├─ data/
 │  ├─ excel/                          # JSON 词库、清单和轻量搜索索引
@@ -198,7 +198,7 @@ pnpm dev
 默认开发地址：
 
 ```text
-http://localhost:5173/StudyEnglish/
+http://localhost:5173/Study/
 ```
 
 生产构建与本地预览：
@@ -307,11 +307,11 @@ pnpm run normalize:audio
 
 也可以在 GitHub Actions 页面手动运行 `Deploy to GitHub Pages` 工作流。
 
-部署完成后访问：<https://yondfane.github.io/StudyEnglish>
+部署完成后访问：<https://yondfane.github.io/Study>
 
 ## 注意事项
 
-- 不要删除 `vite.config.js` 中的 `/StudyEnglish/` 基础路径，否则 GitHub Pages 资源会出现 404。
+- 不要删除 `vite.config.js` 中的 `/Study/` 基础路径，否则 GitHub Pages 资源会出现 404。
 - 不要一次性静态导入全部词库，这会显著增加首屏体积。
 - `data/audio/type-1`、`data/audio/type-2` 的 `catalog.json`、`lookup` 和实际音频目录必须同时发布。
 - 在线发音接口受网络和第三方服务状态影响，失败时会自动回退到设备语音。

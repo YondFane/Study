@@ -62,7 +62,7 @@ function publishProjectAudio() {
 }
 
 export default defineConfig({
-  base: '/StudyEnglish/',
+  base: '/Study/',
   build: {
     // dist/data/audio contains thousands of files and may be in use by the local preview.
     // The audio plugin incrementally copies missing files instead of deleting the tree.

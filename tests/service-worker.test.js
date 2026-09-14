@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs'
 import { deferred } from './helpers/component.js'
 
 const source = readFileSync(new URL('../public/sw.js', import.meta.url), 'utf8')
-const scope = 'https://example.com/StudyEnglish/'
+const scope = 'https://example.com/Study/'
 
 function worker({ cache, fetchResponse = async () => new Response('network'), openError = false }) {
   const listeners = {}

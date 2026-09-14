@@ -24,7 +24,7 @@ Study 是一个基于 Vue 3 和 Vite 的纯前端英语词汇学习网站。
 ## 3. 主要目录
 
 ```text
-StudyEnglish/
+Study/
 ├─ data/
 │  └─ excel/                         # JSON 词库、清单和加载入口
 ├─ src/
@@ -334,7 +334,7 @@ pnpm dev
 默认访问地址：
 
 ```text
-http://localhost:5173/StudyEnglish/
+http://localhost:5173/Study/
 ```
 
 生产构建：
@@ -371,7 +371,7 @@ ERR_PNPM_IGNORED_BUILDS
 `vite.config.js` 中设置了 GitHub Pages 仓库子路径：
 
 ```js
-base: '/StudyEnglish/'
+base: '/Study/'
 ```
 
 不要随意移除，否则部署后 JavaScript 和 CSS 资源可能出现 404。
@@ -403,7 +403,7 @@ base: '/StudyEnglish/'
 - 不要把 16 个数据集改成一次性静态导入。
 - 不要在列表中一次性渲染全部常用单词。
 - 不要同时引入 npm 和 pnpm 锁文件。
-- 不要删除 GitHub Pages 的 `/StudyEnglish/` 基础路径。
+- 不要删除 GitHub Pages 的 `/Study/` 基础路径。
 - 修改练习状态字段时同步更新本地缓存结构说明。
 - 修改词库字段时同步更新浏览详情和练习页面。
 - 保持左侧单词列表内部滚动所需的 `min-height: 0` 和 `overflow-y: auto`。
