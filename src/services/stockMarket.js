@@ -131,7 +131,16 @@ function requireData(payload) {
   return payload.data
 }
 
-export function createStockMarket({ request = publicRequest, storage } = {}) {
+function waitFor(ms, signal) {
+  return new Promise((resolve, reject) => {
+    const abort = () => { clearTimeout(timer); reject(new DOMException('请求已停止', 'AbortError')) }
+    const timer = setTimeout(() => { signal?.removeEventListener('abort', abort); resolve() }, ms)
+    if (signal?.aborted) abort()
+    else signal?.addEventListener('abort', abort, { once: true })
+  })
+}
+
+export function createStockMarket({ request = publicRequest, storage, pause = waitFor } = {}) {
   if (storage === undefined) { try { storage = globalThis.localStorage } catch { /* restricted storage */ } }
   const memory = new Map()
   // A single bounded cache, containing only provider results and calculation inputs.
@@ -220,43 +229,101 @@ export function createStockMarket({ request = publicRequest, storage } = {}) {
     note: `东方财富涨停池口径（不含 ST、科创板及未开板新股）；原因来自选股宝，仅匹配同一交易日${reasonNote}。` }
   }
 
+  // Resume only within this session and a bounded time window. Never merge trading days.
+  let quoteCheckpoint
   async function quotes(date, signal, onProgress) {
-    return cached(`quotes:${date}`, 60000, async () => {
-      const rows = new Map()
-      let total = 0
-      // Stable code order prevents changing intraday turnover ranks from duplicating pages.
-      for (let pn = 1; ; pn++) {
-        const data = requireData(await api('quotes', { pn, pz: 100, po: 0, np: 1, fltt: 2, invt: 2, fid: 'f12',
-          fs: 'm:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048', fields: 'f12,f13,f14,f2,f3,f6,f8,f124' }, signal))
-        if (!Array.isArray(data?.diff) || !data.diff.length) throw new Error('全市场行情分页缺失，无法生成完整榜单')
-        total = number(data.total)
-        if (!total || total < 0) throw new Error('全市场行情总数异常，无法确认扫描范围')
-        for (const r of data.diff) rows.set(r.f12, { code: r.f12, market: r.f13, name: r.f14, price: number(r.f2),
+    if (!quoteCheckpoint || quoteCheckpoint.date !== date ||
+      Date.now() - quoteCheckpoint.at >= (quoteCheckpoint.complete ? 60000 : 15 * 60000)) {
+      quoteCheckpoint = { date, at: Date.now(), rows: new Map(), total: 0, nextPage: 1, complete: false }
+    }
+    const checkpoint = quoteCheckpoint
+    let warning = ''
+    while (!checkpoint.complete) {
+      const pn = checkpoint.nextPage
+      let data, lastError
+      for (let attempt = 0; attempt < 3; attempt++) {
+        if (signal?.aborted) throw new DOMException('请求已停止', 'AbortError')
+        try {
+          data = requireData(await api('quotes', { pn, pz: 100, po: 0, np: 1, fltt: 2, invt: 2, fid: 'f12',
+            fs: 'm:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048', fields: 'f12,f13,f14,f2,f3,f6,f8,f124' }, signal))
+          if (signal?.aborted) throw new DOMException('请求已停止', 'AbortError')
+          if (!Array.isArray(data?.diff) || !data.diff.length) throw new Error('行情分页缺失')
+          if (!Number.isInteger(data.total) || data.total <= 0) throw new Error('行情总数异常')
+          if (checkpoint.total && checkpoint.total !== data.total) {
+            quoteCheckpoint = null
+            throw new Error('证券总数变化，下次将重新读取')
+          }
+          lastError = null
+          break
+        } catch (e) {
+          if (signal?.aborted || e.name === 'AbortError') throw e
+          lastError = e
+          if (!quoteCheckpoint) break
+          if (attempt < 2) {
+            onProgress?.({ phase: `行情第 ${pn} 页连接失败，正在重试 ${attempt + 1}/2`, done: checkpoint.rows.size, total: checkpoint.total, failed: 0, excluded: 0 })
+            await pause(1000 * (attempt + 1), signal)
+          }
+        }
+      }
+      if (lastError) {
+        warning = `全市场行情第 ${pn} 页读取失败：${lastError.message}。${quoteCheckpoint ? '15 分钟内可从该页继续。' : ''}`
+        if (!checkpoint.rows.size) throw new Error(warning)
+        break
+      }
+      checkpoint.total = data.total
+      const previousSize = checkpoint.rows.size
+      for (const r of data.diff) {
+        if (!/^\d{6}$/.test(r.f12)) continue
+        checkpoint.rows.set(r.f12, { code: r.f12, market: r.f13, name: r.f14, price: number(r.f2),
           change: number(r.f3), amount: number(r.f6), turnover: number(r.f8),
           date: r.f124 ? shanghaiDate(new Date(r.f124 * 1000)) : '', quoteTime: r.f124 })
-        onProgress?.({ phase: '正在读取全市场股票', done: rows.size, total, failed: 0, excluded: 0 })
-        if (rows.size >= total) break
-        if (pn > Math.ceil(total / 100) + 2) throw new Error('全市场行情分页不完整，请重试')
-        await new Promise(resolve => setTimeout(resolve, 250))
       }
-      const active = [...rows.values()].filter(row => row.amount > 0 && row.price > 0)
-      if (!active.some(row => row.date === date)) throw new Error('行情源尚无所选日期成交数据。爆量与竞价仅支持当日，请在交易开始后重试。')
-      if (active.some(row => row.date !== date)) throw new Error('全市场行情混有其他日期，无法确认当日完整排名，请稍后重试')
-      return active
-    })
+      if (checkpoint.rows.size === previousSize || checkpoint.rows.size > checkpoint.total || pn > Math.ceil(checkpoint.total / 100) + 2) {
+        quoteCheckpoint = null
+        warning = '全市场行情分页重复或范围异常，下次将重新读取；当前仅展示已读取范围。'
+        break
+      }
+      checkpoint.nextPage++
+      checkpoint.complete = checkpoint.rows.size === checkpoint.total
+      onProgress?.({ phase: '正在读取全市场股票', done: checkpoint.rows.size, total: checkpoint.total, failed: 0, excluded: 0 })
+      if (!checkpoint.complete) await pause(250, signal)
+    }
+    if (signal?.aborted) throw new DOMException('请求已停止', 'AbortError')
+    const active = [...checkpoint.rows.values()].filter(row => row.amount > 0 && row.price > 0)
+    if (active.length && !active.some(row => row.date === date)) throw new Error('行情源尚无所选日期成交数据。爆量与竞价仅支持当日，请在交易开始后重试。')
+    if (active.some(row => row.date !== date)) throw new Error('全市场行情混有其他日期，无法确认当日完整排名，请稍后重试')
+    return { stocks: active, complete: checkpoint.complete, received: checkpoint.rows.size, total: checkpoint.total,
+      startedAt: new Date(checkpoint.at).toISOString(), warning }
   }
 
-  async function scan(kind, date, signal, onProgress) {
+  async function scan(kind, date, signal, onProgress, onResult) {
     if (date !== shanghaiDate()) throw new Error('爆量榜和竞价榜仅支持当日数据，请选择今天。')
     const clock = new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date())
     if (kind === 'auction' && clock < '09:30') throw new Error('开盘竞价成交额将在 09:30 后确认，请稍后刷新。')
-    const stocks = await quotes(date, signal, onProgress)
+    const universe = await quotes(date, signal, onProgress)
+    const stocks = universe.stocks
     const rows = []
     let cursor = 0, done = 0, failed = 0, excluded = 0, consecutiveFailures = 0
     const startedAt = new Date().toISOString()
-    let stoppedBySource = false
+    let stoppedBySource = false, lastFailure = ''
+    const snapshot = (final = false) => {
+      const complete = final && universe.complete && failed === 0 && done === stocks.length
+      const sorted = [...rows].sort((a, b) => kind === 'volume' ? b.ratio - a.ratio : b.auction - a.auction)
+      const coverage = `行情覆盖 ${universe.received}/${universe.total} 条证券；其中有成交股票已核对 ${done}/${stocks.length} 只，${failed} 只失败，${stocks.length - done} 只待核对。`
+      const warning = [universe.warning, stoppedBySource ? `个股接口连续失败，已暂停扫描：${lastFailure}。可稍后继续，成功计算输入已缓存。` : ''].filter(Boolean).join(' ')
+      return { rows: kind === 'auction' ? sorted.slice(0, 50) : sorted, date, complete, scanned: done, total: stocks.length,
+        failed, pending: stocks.length - done, excluded, startedAt, quoteStartedAt: universe.startedAt,
+        quoteReceived: universe.received, quoteTotal: universe.total, warning, coverage, streaming: !final,
+        note: `${kind === 'volume' ? `当日成交额 / 前 20 个交易日平均成交额 > 3；不含当日，${excluded} 只历史不足或基准无效。` : '汇总 09:25–09:30 前的分时成交额，不含连续竞价。'} ${coverage} ${complete ? (kind === 'auction' ? '全市场前 50 名。' : '扫描完成。') : '仅为已核对范围内的结果，不构成完整全市场排名。'} ${warning} 行情分批获取，续读期间成交额并非同一时刻快照。` }
+    }
     let lastProgressAt = 0
+    let lastResultAt = 0
     const progress = (force = false) => {
+      if (signal?.aborted) return
+      if (onResult && (force || !lastResultAt || Date.now() - lastResultAt >= 500)) {
+        lastResultAt = Date.now()
+        onResult(snapshot())
+      }
       if (!force && Date.now() - lastProgressAt < 150 && done !== stocks.length) return
       lastProgressAt = Date.now()
       onProgress?.({ phase: kind === 'volume' ? '核对前 20 个交易日成交额' : '核对开盘集合竞价成交额', done, total: stocks.length, failed, excluded })
@@ -297,24 +364,24 @@ export function createStockMarket({ request = publicRequest, storage } = {}) {
         } catch (e) {
           if (signal?.aborted) break
           failed++
+          lastFailure = e.message || '连接失败'
           if (++consecutiveFailures >= 18) stoppedBySource = true
         }
         done++
         progress()
         // Bound request rate as well as concurrency; do not hammer public endpoints.
-        if (usedNetwork) await new Promise(resolve => setTimeout(resolve, 500))
-        else if (done % 100 === 0) await new Promise(resolve => setTimeout(resolve, 0))
+        if (!stoppedBySource && !signal?.aborted) {
+          try {
+            if (usedNetwork) await pause(500, signal)
+            else if (done % 100 === 0) await pause(0, signal)
+          } catch (e) { if (signal?.aborted) break; throw e }
+        }
       }
     }))
     flush()
     if (signal?.aborted) throw new DOMException('请求已停止', 'AbortError')
-    if (stoppedBySource) throw new Error('公开接口连续失败，已停止扫描以避免持续请求。已成功读取的计算输入已缓存，请稍后重试。')
-    rows.sort((a, b) => kind === 'volume' ? b.ratio - a.ratio : b.auction - a.auction)
-    const complete = failed === 0 && done === stocks.length
-    return { rows: kind === 'auction' ? rows.slice(0, 50) : rows, date, complete, scanned: done, total: stocks.length,
-      failed, excluded, startedAt, note: kind === 'volume'
-        ? `当日成交额 / 前 20 个交易日平均成交额 > 3；不含当日，使用未复权成交额。已核对 ${done}/${stocks.length} 只，${excluded} 只历史不足或基准无效，${failed} 只请求失败。盘中成交额尚未收齐。`
-        : `汇总 09:25–09:30 前的分时成交额（含接口 09:26 记账），不含连续竞价。已核对 ${done}/${stocks.length} 只，${failed} 只缺失。${complete ? '全市场前 50 名。' : '当前仅为已读取股票中的前 50 名，非完整全市场排名。'}` }
+    progress(true)
+    return snapshot(true)
   }
 
   async function news(stock, date, signal) {

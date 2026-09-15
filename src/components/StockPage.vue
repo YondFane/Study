@@ -54,17 +54,26 @@ async function load(force = false) {
   const key = `${current}:${selectedDate}`, saved = market.getBoard(key)
   result.value = saved
   selectedCode.value = saved?.rows.some(row => row.code === previousSelection) ? previousSelection : saved?.rows[0]?.code ?? ''
-  if (!force && saved && Date.now() - saved.savedAt < 60000) { loading.value = false; return }
+  if (!force && saved && saved.complete !== false && Date.now() - saved.savedAt < 60000) { loading.value = false; return }
   if (!/^\d{4}-\d{2}-\d{2}$/.test(selectedDate) || selectedDate > today.value) { error.value = '请选择有效日期，不能查询未来行情。'; loading.value = false; return }
   loading.value = true
-  try {
-    const data = current === 'billboard' ? await market.billboard(selectedDate, signal)
-      : current === 'limits' ? await market.limits(selectedDate, signal)
-        : await market.scan(current, selectedDate, signal, value => { if (id === requestId) progress.value = value })
-    if (id !== requestId) return
+  const accept = (data, partial = false) => {
+    if (id !== requestId || signal.aborted) return
+    // Keep the previous visible board until the new scan has found rows or finished.
+    if (partial && !data.rows.length && result.value?.rows.length) return
     const updated = { ...data, savedAt: Date.now(), fetchedAt: new Date().toISOString() }
     result.value = updated; market.saveBoard(key, updated)
     selectedCode.value = updated.rows.some(row => row.code === selectedCode.value) ? selectedCode.value : updated.rows[0]?.code ?? ''
+    page.value = Math.min(page.value, pages.value)
+  }
+  try {
+    const data = current === 'billboard' ? await market.billboard(selectedDate, signal)
+      : current === 'limits' ? await market.limits(selectedDate, signal)
+        : await market.scan(current, selectedDate, signal,
+          value => { if (id === requestId && !signal.aborted) progress.value = value },
+          data => accept(data, true))
+    if (id !== requestId) return
+    accept(data)
   } catch (e) {
     if (id !== requestId) return
     if (e.name === 'AbortError') stopped.value = true
@@ -147,11 +156,11 @@ onBeforeUnmount(() => { ++requestId; ++newsId; controller?.abort(); newsControll
           <div v-else-if="stopped && !ready" class="state-box" role="status"><span class="state-symbol" aria-hidden="true">Ⅱ</span><h3>已停止获取</h3><p>已完成的计算输入会保留在缓存中，重新获取可复用。</p><button type="button" class="outline-button" @click="load(true)">重新获取</button></div>
           <template v-else-if="ready">
             <div v-if="loading || error || stopped" class="refresh-notice" :class="{ failed: error }" role="status">
-              <span v-if="loading">正在更新，暂显示 {{ displayTime(result.fetchedAt) }} 获取的结果。<span v-if="progress"> {{ progress.done }} / {{ progress.total }} 只</span></span>
+              <span v-if="loading">{{ result.streaming ? '正在扫描，结果持续更新。' : `正在更新，暂显示 ${displayTime(result.fetchedAt)} 获取的结果。` }}<span v-if="progress"> {{ progress.phase }} · {{ progress.done }} / {{ progress.total }}</span></span>
               <span v-else>{{ error ? `刷新失败：${error}` : '已停止更新。' }} 当前保留 {{ displayTime(result.fetchedAt) }} 的结果。</span>
               <button v-if="loading" type="button" @click="controller?.abort()">停止更新</button>
             </div>
-            <div v-if="result.complete === false" class="partial-warning" role="status">{{ result.failed }} 只股票数据缺失，本次结果不构成完整全市场排名。<button type="button" @click="load(true)">重试补全 ↗</button></div>
+            <div v-if="result.complete === false" class="partial-warning" role="status"><span>{{ result.coverage || `${result.failed} 只股票数据缺失。` }} 本次结果不构成完整全市场排名。<span v-if="result.warning"> {{ result.warning }}</span></span><button v-if="!loading" type="button" @click="load(true)">继续扫描 / 补全 ↗</button></div>
             <div v-if="filtered.length" class="table-scroll">
               <table><thead><tr><th scope="col">排名 / 股票</th><th scope="col">涨跌幅</th><th scope="col">{{ metricLabel }}</th><th scope="col">{{ active === 'volume' ? '前 20 日均额' : '换手率' }}</th><th scope="col">{{ active === 'billboard' ? '上榜原因' : active === 'limits' ? '连板 / 涨停原因' : active === 'volume' ? '当日成交额' : '消息面' }}</th></tr></thead>
                 <tbody><tr v-for="(stock, index) in visible" :key="stock.code" :class="{ 'selected-row': selectedCode === stock.code }">
@@ -160,7 +169,7 @@ onBeforeUnmount(() => { ++requestId; ++newsId; controller?.abort(); newsControll
                   <td><span v-if="active === 'limits'" class="board-tag">{{ stock.boards }} 板</span><span v-if="active === 'billboard' || active === 'limits'" class="reason-preview" :title="stock.reason">{{ stock.reason || '原因待披露' }}</span><span v-else-if="active === 'volume'" class="numeric muted">{{ money(stock.amount) }}</span><button v-else type="button" class="news-link" @click="choose(stock)">查看消息 <span>↗</span></button></td>
                 </tr></tbody></table>
             </div>
-            <div v-else class="state-box"><span class="state-symbol" aria-hidden="true">⌕</span><h3>{{ query || tier !== 'all' ? '没有符合筛选的股票' : '该日期暂无入榜股票' }}</h3><p>{{ query || tier !== 'all' ? '试试其他名称、代码或连板分组。' : result.note }}</p><button v-if="query || tier !== 'all'" type="button" class="outline-button" @click="query = ''; tier = 'all'">清除筛选</button></div>
+            <div v-else class="state-box"><span class="state-symbol" aria-hidden="true">⌕</span><h3>{{ query || tier !== 'all' ? '没有符合筛选的股票' : result.complete === false ? '已核对范围内暂未发现入榜股票' : '该日期暂无入榜股票' }}</h3><p>{{ query || tier !== 'all' ? '试试其他名称、代码或连板分组。' : result.note }}</p><button v-if="query || tier !== 'all'" type="button" class="outline-button" @click="query = ''; tier = 'all'">清除筛选</button></div>
             <div v-if="filtered.length" class="table-footer"><span>{{ (page - 1) * 25 + 1 }}–{{ Math.min(page * 25, filtered.length) }} / {{ filtered.length }} 只</span><div><button type="button" :disabled="page <= 1" aria-label="上一页股票" @click="page--">←</button><span>{{ page }} / {{ pages }}</span><button type="button" :disabled="page >= pages" aria-label="下一页股票" @click="page++">→</button></div></div>
           </template>
         </section>

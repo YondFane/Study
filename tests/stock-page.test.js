@@ -8,8 +8,8 @@ import * as stockPreferences from '../src/services/stockPreferences.js'
 const flush = async () => { await nextTick(); await nextTick() }
 function setup() {
   const requests = [], news = [], boards = new Map()
-  const request = (kind, date, signal) => {
-    const task = { ...deferred(), kind, date, signal }; requests.push(task); return task.promise
+  const request = (kind, date, signal, onProgress, onResult) => {
+    const task = { ...deferred(), kind, date, signal, onProgress, onResult }; requests.push(task); return task.promise
   }
   const service = {
     billboard: (date, signal) => request('billboard', date, signal),
@@ -115,4 +115,25 @@ test('消息按12条递增加载，切换消息分类恢复首批', async t => {
   assert.equal(app.state.visibleNews.value.length, 24)
   app.state.newsFilter.value = 'positive'; await flush()
   assert.equal(app.state.visibleNews.value.length, 12)
+})
+
+test('扫描中可查看部分股票，停止后保留结果，切回部分榜单自动续读', async t => {
+  const app = setup(); t.after(app.unmount)
+  app.state.active.value = 'volume'; await flush()
+  const scan = app.requests[1]
+  scan.onResult({ rows: [{ code: '000001', name: '测试一', ratio: 4 }], complete: false, streaming: true, scanned: 1, total: 100 })
+  await flush()
+  assert.equal(app.state.loading.value, true)
+  assert.equal(app.state.rows.value.length, 1)
+  assert.equal(app.news.length, 1)
+  scan.reject(new DOMException('已停止', 'AbortError')); await flush()
+  assert.equal(app.state.stopped.value, true)
+  assert.equal(app.state.rows.value.length, 1)
+  app.state.active.value = 'billboard'; await flush()
+  scan.onResult({ rows: [{ code: '错误股票' }], complete: false })
+  assert.equal(app.state.rows.value.length, 0, '迟到的流式结果不能覆盖新榜单')
+  app.state.active.value = 'volume'; await flush()
+  assert.equal(app.requests.length, 4)
+  assert.equal(app.state.rows.value[0].code, '000001')
+  assert.equal(app.state.loading.value, true)
 })
